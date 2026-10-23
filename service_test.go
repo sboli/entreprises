@@ -86,6 +86,14 @@ func TestImportAndAPI(t *testing.T) {
 	if s.count != 4 {
 		t.Fatalf("privacy filters: got %d rows", s.count)
 	}
+	var extraTables int
+	if e := s.db.QueryRow("SELECT count(*) FROM information_schema.tables WHERE table_schema='main' AND table_name NOT IN ('companies','metadata')").Scan(&extraTables); e != nil {
+		t.Fatal(e)
+	}
+	if extraTables != 0 {
+		t.Fatal("published snapshot retained import tables")
+	}
+
 	r := request(h, "/api/pappers-search?q=etoile&limit=2")
 	if r.Code != 200 {
 		t.Fatal(r.Body.String())
@@ -285,5 +293,45 @@ func TestScheduledRedirectedRefresh(t *testing.T) {
 	s.schedule(ctx)
 	if s.version != version {
 		t.Fatal("fresh snapshot was downloaded again")
+	}
+}
+
+func TestSeparateImportAndServingBudgets(t *testing.T) {
+	c := testConfig(t)
+	c.MemoryLimit = "64MiB"
+	c.ImportMemoryLimit = "192MiB"
+	c.Threads = 2
+	c.ImportThreads = 1
+	path := filepath.Join(c.DataDir, "settings.duckdb")
+	db, e := openDB(path, c, false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var memory string
+	var threads int
+	var preserve bool
+	if e = db.QueryRow("SELECT current_setting('memory_limit'),current_setting('threads'),current_setting('preserve_insertion_order')").Scan(&memory, &threads, &preserve); e != nil {
+		t.Fatal(e)
+	}
+	if !strings.Contains(memory, "192") || threads != 1 || preserve {
+		t.Fatalf("import settings: memory=%s threads=%d preserve=%t", memory, threads, preserve)
+	}
+	if _, e = db.Exec("CREATE TABLE marker AS SELECT 1"); e != nil {
+		t.Fatal(e)
+	}
+	if e = db.Close(); e != nil {
+		t.Fatal(e)
+	}
+	db, e = openDB(path, c, true)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer db.Close()
+	var external bool
+	if e = db.QueryRow("SELECT current_setting('memory_limit'),current_setting('threads'),current_setting('enable_external_access')").Scan(&memory, &threads, &external); e != nil {
+		t.Fatal(e)
+	}
+	if !strings.Contains(memory, "64") || threads != 2 || external {
+		t.Fatalf("serving settings: memory=%s threads=%d external=%t", memory, threads, external)
 	}
 }

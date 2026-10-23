@@ -112,7 +112,8 @@ def main():
             "-v", volume + ":/data", "-e", "API_KEY=" + key,
             "-e", "ESTABLISHMENTS_URL=" + fixture_base + "/est",
             "-e", "LEGAL_UNITS_URL=" + fixture_base + "/legal.zip",
-            "-e", "DUCKDB_MEMORY_LIMIT=256MB", "-e", "DUCKDB_THREADS=1",
+            "-e", "DUCKDB_MEMORY_LIMIT=64MiB", "-e", "DUCKDB_IMPORT_MEMORY_LIMIT=256MiB",
+            "-e", "DUCKDB_THREADS=1",
             "-e", "REFRESH_INTERVAL=5s", "-e", "RETRY_INTERVAL=1s", "-e", "REFRESH_TIMEOUT=20s",
             args.image).stdout.strip()
         address = docker("port", container, "8080/tcp").stdout.strip()

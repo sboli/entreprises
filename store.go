@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,16 +38,29 @@ func openDB(path string, c config, readOnly bool) (*sql.DB, error) {
 		return nil, e
 	}
 	db.SetMaxOpenConns(1)
-	for _, q := range []string{"SET memory_limit=" + literal(c.MemoryLimit), fmt.Sprintf("SET threads=%d", c.Threads), "SET enable_external_access=false"} {
-		// External access is disabled only for the API connection; the importer reads local CSVs.
-		if !readOnly && strings.Contains(q, "external_access") {
-			continue
+	memory, threads := c.MemoryLimit, c.Threads
+	if !readOnly {
+		if c.ImportMemoryLimit != "" {
+			memory = c.ImportMemoryLimit
 		}
+		threads = c.ImportThreads
+		if threads == 0 {
+			threads = 1
+		}
+	}
+	settings := []string{"SET memory_limit=" + literal(memory), fmt.Sprintf("SET threads=%d", threads)}
+	if readOnly {
+		settings = append(settings, "SET enable_external_access=false")
+	} else {
+		settings = append(settings, "SET preserve_insertion_order=false", "SET temp_directory="+literal(path+".tmp"))
+	}
+	for _, q := range settings {
 		if _, e = db.Exec(q); e != nil {
 			db.Close()
 			return nil, e
 		}
 	}
+
 	return db, nil
 }
 func (s *store) load() error {
@@ -113,10 +127,11 @@ func buildSnapshot(ctx context.Context, c config, establishments, legal, path st
 	if e != nil {
 		return 0, e
 	}
-	defer db.Close()
-	if _, e = db.ExecContext(ctx, "SET temp_directory="+literal(path+".tmp")); e != nil {
-		return 0, e
-	}
+	defer func() {
+		if db != nil {
+			db.Close()
+		}
+	}()
 	if e = csvView(ctx, db, "establishment_csv", establishments, []string{"siren", "siret", "statutDiffusionEtablissement", "etablissementSiege", "etatAdministratifEtablissement", "denominationUsuelleEtablissement", "enseigne1Etablissement", "enseigne2Etablissement", "enseigne3Etablissement", "numeroVoieEtablissement", "indiceRepetitionEtablissement", "typeVoieEtablissement", "libelleVoieEtablissement", "codePostalEtablissement", "libelleCommuneEtablissement", "activitePrincipaleEtablissement"}); e != nil {
 		return 0, e
 	}
@@ -124,12 +139,12 @@ func buildSnapshot(ctx context.Context, c config, establishments, legal, path st
 		return 0, e
 	}
 	queries := []string{
-		`CREATE TEMP TABLE legal AS SELECT siren,
+		`CREATE TABLE legal AS SELECT siren,
  coalesce(denominationUniteLegale, nullif(trim(concat_ws(' ',prenom1UniteLegale,nomUniteLegale)),''),'') AS legal_name,
  concat_ws(' ',denominationUsuelle1UniteLegale,denominationUsuelle2UniteLegale,denominationUsuelle3UniteLegale,sigleUniteLegale) AS aliases,
  coalesce(categorieJuridiqueUniteLegale,'') AS legal_form, etatAdministratifUniteLegale='A' AS legal_active
  FROM legal_csv WHERE statutDiffusionUniteLegale='O' AND regexp_full_match(siren,'[0-9]{9}')`,
-		`CREATE TABLE companies AS SELECT e.siret,e.siren,l.legal_name,
+		`CREATE TABLE imported_companies AS SELECT e.siret,e.siren,l.legal_name,
  coalesce(e.denominationUsuelleEtablissement,e.enseigne1Etablissement,e.enseigne2Etablissement,e.enseigne3Etablissement,l.legal_name,'') AS name,
  coalesce(e.denominationUsuelleEtablissement,e.enseigne1Etablissement,e.enseigne2Etablissement,e.enseigne3Etablissement,'') AS trade_name,
  trim(concat_ws(' ',e.numeroVoieEtablissement,e.indiceRepetitionEtablissement,e.typeVoieEtablissement,e.libelleVoieEtablissement)) AS address,
@@ -139,16 +154,37 @@ func buildSnapshot(ctx context.Context, c config, establishments, legal, path st
  coalesce(e.etatAdministratifEtablissement='A' AND l.legal_active,false) AS active,
  lower(strip_accents(concat_ws(' ',l.legal_name,l.aliases,e.denominationUsuelleEtablissement,e.enseigne1Etablissement,e.enseigne2Etablissement,e.enseigne3Etablissement))) AS search_name
  FROM establishment_csv e JOIN legal l ON e.siren=l.siren
- WHERE e.statutDiffusionEtablissement='O' AND regexp_full_match(e.siret,'[0-9]{14}') ORDER BY e.siret`,
-		`CREATE UNIQUE INDEX companies_siret ON companies(siret)`,
-		`CREATE INDEX companies_siren ON companies(siren)`,
+ WHERE e.statutDiffusionEtablissement='O' AND regexp_full_match(e.siret,'[0-9]{14}')`,
+		`DROP TABLE legal`,
 		`DROP VIEW establishment_csv`, `DROP VIEW legal_csv`,
+		`CREATE TABLE companies AS SELECT * FROM imported_companies ORDER BY siret`,
+		`DROP TABLE imported_companies`,
+		`CHECKPOINT`,
+		`CREATE UNIQUE INDEX companies_siret ON companies(siret)`,
+		`CHECKPOINT`,
+		`CREATE INDEX companies_siren ON companies(siren)`,
+		`CHECKPOINT`,
 		`CREATE TABLE metadata AS SELECT current_timestamp AS refreshed_at,count(*) AS row_count FROM companies`,
 		`CHECKPOINT`,
 	}
 	for _, q := range queries {
+		phase := strings.SplitN(q, " AS ", 2)[0]
+		slog.Info("registry import step started", "step", phase)
+		started := time.Now()
 		if _, e = db.ExecContext(ctx, q); e != nil {
-			return 0, e
+			return 0, fmt.Errorf("%s: %w", phase, e)
+		}
+		slog.Info("registry import step completed", "step", phase, "duration", time.Since(started))
+		// Reopen after checkpoints to release index/build memory before the next step.
+		if q == "CHECKPOINT" {
+			if e = db.Close(); e != nil {
+				db = nil
+				return 0, e
+			}
+			db, e = openDB(path, c, false)
+			if e != nil {
+				return 0, e
+			}
 		}
 	}
 	var count int64

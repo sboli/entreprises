@@ -105,10 +105,14 @@ Use `ghcr.io/sboli/entreprises:latest` to run the published image, or pin a comm
 | `REFRESH_TIMEOUT` | `12h` for the entire refresh |
 | `QUERY_TIMEOUT` | `15s` including database connection wait |
 | `DUCKDB_MEMORY_LIMIT` | `2GB` (Compose sets `4GB`) |
-| `DUCKDB_THREADS` | `2` |
+| `DUCKDB_IMPORT_MEMORY_LIMIT` | inherits `DUCKDB_MEMORY_LIMIT`; set separately for large imports |
+| `DUCKDB_THREADS` | `2` (API) |
+| `DUCKDB_IMPORT_THREADS` | `1` |
 | `QUERY_CONCURRENCY` | `4` (excess requests return 429) |
 | `MAX_DOWNLOAD_BYTES` | `10737418240` (10 GiB per ZIP) |
 | `MAX_EXTRACT_BYTES` | `42949672960` (40 GiB per CSV) |
+
+Imports disable insertion-order preservation and use separate disk-backed materialization steps for the join and sort. Intermediate tables are dropped before index creation, and checkpoints reopen the database to release build memory between indexes. Each import step is logged. For an 8 GiB container, a starting budget is `DUCKDB_MEMORY_LIMIT=1GB` and `DUCKDB_IMPORT_MEMORY_LIMIT=6GB`; leave headroom for allocations outside DuckDB limits. Index creation still requires enough RAM for each index.
 
 Each HTTP download also has a six-hour timeout. HTTP query values are bound as SQL parameters. The API opens the published database read-only with external access disabled; import has a separate connection with local file access. Resource limits bound concurrency rather than request rate; use your ingress for rate limiting if needed.
 
