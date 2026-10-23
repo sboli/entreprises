@@ -1,0 +1,17 @@
+services:
+  entreprises:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      DUCKDB_MEMORY_LIMIT: 4GB
+      DUCKDB_THREADS: "2"
+      API_KEY: ${API_KEY:-}
+    volumes:
+      - registry:/data
+    mem_limit: 12g
+    cpus: 4
+    restart: unless-stopped
+    stop_grace_period: 60s
+volumes:
+  registry:

@@ -1,0 +1,9 @@
+*.csv
+*.zip
+/0651fb76-bcf3-4f6a-a38d-bc04fa708576
+/data/
+/entreprises
+*.test
+
+__pycache__/
+*.pyc

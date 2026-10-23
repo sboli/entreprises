@@ -1,0 +1,105 @@
+# Apply in the desired namespace; the namespace and storage class are not assumed.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: entreprises-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 200Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: entreprises
+spec:
+  replicas: 1
+  # DuckDB and its volume have one owning process. Never use a rolling overlap.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: entreprises
+  template:
+    metadata:
+      labels:
+        app: entreprises
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: entreprises
+          image: entreprises:local # Replace with your published registry/image:tag.
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: DATA_DIR
+              value: /data
+            - name: DUCKDB_MEMORY_LIMIT
+              value: 4GB
+            - name: DUCKDB_THREADS
+              value: "2"
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: entreprises-api
+                  key: api-key
+                  optional: true
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+          # Liveness stays healthy during a long first download/import.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: entreprises-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: entreprises
+spec:
+  type: ClusterIP
+  selector:
+    app: entreprises
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
